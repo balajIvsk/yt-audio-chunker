@@ -18,7 +18,13 @@ async def split_audio(req: AudioSplitRequest):
         input_path = os.path.join(tmp_dir, "input.mp3")
 
         logs.append(f"📥 Downloading MP3 from {req.audio_url}")
-        response = requests.get(req.audio_url, stream=True)
+        headers = {
+    "User-Agent": "Mozilla/5.0",
+    "Accept": "*/*",
+    "Referer": req.audio_url
+    }
+        response = requests.get(req.audio_url, stream=True, headers=headers)
+
 
         if response.status_code != 200:
             raise Exception(f"HTTP {response.status_code}")
@@ -65,3 +71,4 @@ async def split_audio(req: AudioSplitRequest):
     except Exception as e:
         logs.append(f"❌ Error during ffmpeg split: {str(e)}")
         return {"chunks": [], "logs": logs}
+
