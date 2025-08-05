@@ -16,11 +16,17 @@ async def split_audio(req: AudioSplitRequest):
     try:
         tmp_dir = tempfile.mkdtemp()
         input_path = os.path.join(tmp_dir, "input.mp3")
+
         logs.append(f"📥 Downloading MP3 from {req.audio_url}")
-        response = requests.get(req.audio_url)
+        response = requests.get(req.audio_url, stream=True)
+
+        if response.status_code != 200:
+            raise Exception(f"HTTP {response.status_code}")
 
         with open(input_path, "wb") as f:
-            f.write(response.content)
+            for chunk in response.iter_content(chunk_size=8192):
+                if chunk:
+                    f.write(chunk)
 
         size = os.path.getsize(input_path)
         logs.append(f"✅ MP3 downloaded — size: {size} bytes")
