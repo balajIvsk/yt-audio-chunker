@@ -1,74 +1,67 @@
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
-import tempfile, os, subprocess, base64
-import requests
+from flask import Flask, request, jsonify, send_from_directory
+import os
+import subprocess
+from werkzeug.utils import secure_filename
+import glob
 
-app = FastAPI()
+app = Flask(__name__)
 
-class AudioSplitRequest(BaseModel):
-    audio_url: str
-    chunk_duration: int = 120
+UPLOAD_FOLDER = 'uploads'
+OUTPUT_FOLDER = 'chunks'
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+os.makedirs(OUTPUT_FOLDER, exist_ok=True)
 
-@app.post("/split-audio")
-async def split_audio(req: AudioSplitRequest):
-    logs = []
+@app.route('/split_audio', methods=['POST'])
+def split_audio():
+    if 'audio_file' not in request.files:
+        return jsonify({'error': 'No audio_file provided'}), 400
 
-    try:
-        tmp_dir = tempfile.mkdtemp()
-        input_path = os.path.join(tmp_dir, "input.mp3")
+    audio_file = request.files['audio_file']
+    filename = secure_filename(audio_file.filename)
+    if filename == '':
+        return jsonify({'error': 'No selected file'}), 400
 
-        logs.append(f"📥 Downloading MP3 from {req.audio_url}")
-        headers = {
-    "User-Agent": "Mozilla/5.0",
-    "Accept": "*/*",
-    "Referer": req.audio_url
-    }
-        response = requests.get(req.audio_url, stream=True, headers=headers)
+    input_path = os.path.join(UPLOAD_FOLDER, filename)
+    audio_file.save(input_path)
 
-
-        if response.status_code != 200:
-            raise Exception(f"HTTP {response.status_code}")
-
-        with open(input_path, "wb") as f:
-            for chunk in response.iter_content(chunk_size=8192):
-                if chunk:
-                    f.write(chunk)
-
-        size = os.path.getsize(input_path)
-        logs.append(f"✅ MP3 downloaded — size: {size} bytes")
-    except Exception as e:
-        logs.append(f"❌ Error downloading file: {str(e)}")
-        return {"chunks": [], "logs": logs}
+    file_basename = os.path.splitext(filename)[0]
+    output_pattern = os.path.join(OUTPUT_FOLDER, f"{file_basename}_%03d.mp3")
 
     try:
-        output_template = os.path.join(tmp_dir, "chunk_%03d.mp3")
-        cmd = [
-            "ffmpeg", "-i", input_path, "-f", "segment",
-            "-segment_time", str(req.chunk_duration),
-            "-c", "libmp3lame", output_template
+        command = [
+            'ffmpeg',
+            '-i', input_path,
+            '-f', 'segment',
+            '-segment_time', '120',
+            '-c', 'copy',
+            output_pattern
         ]
-        logs.append("🛠️ Running ffmpeg command:")
-        logs.append(" ".join(cmd))
+        subprocess.run(command, check=True, capture_output=True)
 
-        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        stderr_output = result.stderr.decode()
-        logs.append("🪵 FFMPEG STDERR:")
-        logs.append(stderr_output)
+        # Gather chunk file names
+        chunks = sorted(glob.glob(os.path.join(OUTPUT_FOLDER, f"{file_basename}_*.mp3")))
+        chunk_urls = [
+            request.url_root + f"chunks/{os.path.basename(chunk)}" for chunk in chunks
+        ]
 
-        chunk_files = sorted([f for f in os.listdir(tmp_dir) if f.startswith("chunk_")])
-        logs.append(f"🔍 Found {len(chunk_files)} chunk(s)")
+        return jsonify({
+            'message': 'Audio split successfully',
+            'chunks': chunk_urls
+        }), 200
 
-        output = []
-        for chunk in chunk_files:
-            chunk_path = os.path.join(tmp_dir, chunk)
-            with open(chunk_path, "rb") as f:
-                b64 = base64.b64encode(f.read()).decode("utf-8")
-                output.append({ "filename": chunk, "base64": b64 })
+    except subprocess.CalledProcessError as e:
+        return jsonify({'error': f"FFmpeg failed: {e.stderr.decode()}"}), 500
 
-        logs.append("✅ Chunking complete")
-        return { "chunks": output, "logs": logs }
+    finally:
+        os.remove(input_path)
 
-    except Exception as e:
-        logs.append(f"❌ Error during ffmpeg split: {str(e)}")
-        return {"chunks": [], "logs": logs}
+@app.route('/chunks/<filename>', methods=['GET'])
+def download_chunk(filename):
+    return send_from_directory(OUTPUT_FOLDER, filename)
 
+@app.route('/', methods=['GET'])
+def health():
+    return jsonify({"status": "running"}), 200
+
+if __name__ == '__main__':
+    app.run(debug=False, host='0.0.0.0', port=5000)
